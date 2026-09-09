@@ -891,9 +891,9 @@ if st.session_state["phase"] == "upload":
             show_progress(
                 slot,
                 [
-                    "Uploading your file",
-                    "Extracting the text",
-                    "Reading the structure",
+                    "Checking the file",
+                    "Reading the text",
+                    "Judging whether it suits an infographic",
                     "Choosing a layout",
                 ],
                 est=25,
@@ -911,12 +911,55 @@ if st.session_state["phase"] == "upload":
 
             if error:
                 st.error(error)
-                st.caption(
-                    "A document works here when its text can be selected "
-                    "and copied in a PDF reader. If the text is really a "
-                    "picture, or the file was exported without its fonts, "
-                    "there is nothing readable for the agent to work from."
+
+            elif (data or {}).get("status") == "rejected":
+                # Not an error. The file simply cannot become an
+                # infographic, and the agent explains why. Arabic
+                # replies are laid out right to left.
+                rtl = data.get("dir") == "rtl"
+                side = "right" if rtl else "left"
+                flow = "rtl" if rtl else "ltr"
+
+                def _safe(value):
+                    return (str(value or "")
+                            .replace("&", "&amp;")
+                            .replace("<", "&lt;")
+                            .replace(">", "&gt;"))
+
+                st.markdown(
+                    f"<div style='direction:{flow};text-align:{side};"
+                    "background:#fef3c7;color:#92400e;padding:14px 18px;"
+                    "border-radius:10px;font-weight:600;font-size:1rem'>"
+                    f"{_safe(data.get('title', 'This file cannot be used'))}"
+                    "</div>",
+                    unsafe_allow_html=True,
                 )
+
+                st.write("")
+
+                st.markdown(
+                    f"<div style='direction:{flow};text-align:{side};"
+                    "font-size:1rem;line-height:1.8'>"
+                    f"{_safe(data.get('message', ''))}</div>",
+                    unsafe_allow_html=True,
+                )
+
+                st.write("")
+
+                with st.expander("What the checker found"):
+                    q = data.get("quality") or {}
+                    m = data.get("meta") or {}
+                    st.write(
+                        f"Pages: {m.get('page_count', '?')}  \n"
+                        f"Readable words: {q.get('real_words', '?')}  \n"
+                        f"Readable words per page: {q.get('words_per_page', '?')}  \n"
+                        f"Unreadable characters: {q.get('junk_percent', '?')}%"
+                    )
+                    st.caption(
+                        "A document works here when its text can be selected "
+                        "and copied in a PDF reader."
+                    )
+
             else:
                 st.session_state["profile"] = data.get("profile") or {}
                 st.session_state["document_text"] = data.get("document_text")
