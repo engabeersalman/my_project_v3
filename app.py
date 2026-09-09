@@ -824,7 +824,6 @@ elif st.session_state["phase"] == "choose":
             [
                 "Sending the document",
                 "Pulling out the key points",
-                "Checking every figure against the text",
                 f"Laying out the {TEMPLATES[template]['label']}",
                 "Almost there",
             ],
@@ -997,7 +996,6 @@ else:
                 [
                     "Re-reading the document",
                     "Pulling out the key points",
-                    "Checking every figure against the text",
                     f"Laying out the {TEMPLATES[template]['label']}",
                 ],
                 accent=accent or "#5b6ef5",
