@@ -597,6 +597,7 @@ DEFAULTS = {
     "ai_output": None,       # cached extraction, reused for restyles
     "built_options": None,   # options that produced the current result
     "history": [],           # (question, answer, category, label, tone)
+    "rejection": None,       # why the last upload was refused
 }
 
 for key, value in DEFAULTS.items():
@@ -891,6 +892,12 @@ if st.session_state["phase"] == "upload":
 
     if uploaded_file is not None:
 
+        # a freshly chosen file supersedes any previous refusal
+        if (st.session_state.get("rejection")
+                and st.session_state["rejection"].get("filename")
+                != uploaded_file.name):
+            st.session_state["rejection"] = None
+
         file_bytes = uploaded_file.getvalue()
         size_mb = len(file_bytes) / (1024 * 1024)
 
@@ -928,83 +935,11 @@ if st.session_state["phase"] == "upload":
                 st.error(error)
 
             elif (data or {}).get("status") == "rejected":
-                # Not an error. The file simply cannot become an
-                # infographic, and the agent explains why. Arabic
-                # replies are laid out right to left.
-                rtl = data.get("dir") == "rtl"
-                side = "right" if rtl else "left"
-                flow = "rtl" if rtl else "ltr"
-
-                def _safe(value):
-                    return (str(value or "")
-                            .replace("&", "&amp;")
-                            .replace("<", "&lt;")
-                            .replace(">", "&gt;"))
-
-                st.markdown(
-                    f"<div style='direction:{flow};text-align:{side};"
-                    "background:#fef3c7;color:#92400e;padding:14px 18px;"
-                    "border-radius:10px;font-weight:600;font-size:1rem'>"
-                    f"{_safe(data.get('title', 'This file cannot be used'))}"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-
-                st.write("")
-
-                st.markdown(
-                    f"<div style='direction:{flow};text-align:{side};"
-                    "font-size:1rem;line-height:1.8'>"
-                    f"{_safe(data.get('message', ''))}</div>",
-                    unsafe_allow_html=True,
-                )
-
-                st.write("")
-
-                # A clear next step, so the screen is not a dead end
-                st.info(
-                    "Please upload a different PDF. Choose one whose text "
-                    "you can select and copy when you open it in a PDF "
-                    "reader."
-                )
-
-                if st.button("Choose a different file", type="primary",
-                             key="reupload_after_reject"):
-                    # empty the picker, stay on this step
-                    st.session_state["upload_round"] += 1
-                    st.rerun()
-
-                with st.expander("What the checker found"):
-                    q = data.get("quality") or {}
-
-                    lines = [
-                        f"Pages: {q.get('pages', '?')}",
-                        f"Readable words: {q.get('real_words', '?')}",
-                        f"Readable words per page: {q.get('words_per_page', '?')}",
-                    ]
-
-                    # show whichever measurement actually caused the
-                    # rejection, rather than a fixed list that may all
-                    # read as normal
-                    if q.get("gibberish"):
-                        lines.append(
-                            "Words that are one letter repeated: "
-                            f"{q.get('repeated_word_percent', '?')}%"
-                        )
-                        lines.append(
-                            f"Vocabulary variety: {q.get('variety_percent', '?')}%"
-                        )
-                    else:
-                        lines.append(
-                            f"Unreadable characters: {q.get('junk_percent', '?')}%"
-                        )
-
-                    st.write("  \n".join(lines))
-
-                    st.caption(
-                        "A document works here when its text can be "
-                        "selected and copied in a PDF reader."
-                    )
+                # Store it and rerun. Drawing the panel here would put
+                # its buttons inside this branch, and a button inside a
+                # branch that only runs on click can never be clicked.
+                st.session_state["rejection"] = data
+                st.rerun()
 
             else:
                 st.session_state["profile"] = data.get("profile") or {}
@@ -1014,8 +949,85 @@ if st.session_state["phase"] == "upload":
                 st.session_state["phase"] = "choose"
                 st.rerun()
 
-    else:
+    elif not st.session_state.get("rejection"):
         st.info("Choose a PDF to begin.")
+
+    # --- the refusal, drawn outside the button branch ---
+
+    rejection = st.session_state.get("rejection")
+
+    if rejection:
+
+        rtl = rejection.get("dir") == "rtl"
+        side = "right" if rtl else "left"
+        flow = "rtl" if rtl else "ltr"
+
+        def _safe(value):
+            return (str(value or "")
+                    .replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;"))
+
+        st.markdown(
+            f"<div style='direction:{flow};text-align:{side};"
+            "background:#fef3c7;color:#92400e;padding:14px 18px;"
+            "border-radius:10px;font-weight:600;font-size:1rem'>"
+            f"{_safe(rejection.get('title', 'This file cannot be used'))}"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.write("")
+
+        st.markdown(
+            f"<div style='direction:{flow};text-align:{side};"
+            "font-size:1rem;line-height:1.8'>"
+            f"{_safe(rejection.get('message', ''))}</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.write("")
+
+        st.info(
+            "Please upload a different PDF. Choose one whose text you can "
+            "select and copy when you open it in a PDF reader."
+        )
+
+        if st.button("Choose a different file", type="primary",
+                     key="reupload_after_reject"):
+            st.session_state["rejection"] = None
+            st.session_state["upload_round"] += 1
+            st.rerun()
+
+        with st.expander("What the checker found"):
+            q = rejection.get("quality") or {}
+
+            lines = [
+                f"Pages: {q.get('pages', '?')}",
+                f"Readable words: {q.get('real_words', '?')}",
+                f"Readable words per page: {q.get('words_per_page', '?')}",
+            ]
+
+            # show whichever measurement actually caused the rejection
+            if q.get("gibberish"):
+                lines.append(
+                    "Words that are one letter repeated: "
+                    f"{q.get('repeated_word_percent', '?')}%"
+                )
+                lines.append(
+                    f"Vocabulary variety: {q.get('variety_percent', '?')}%"
+                )
+            else:
+                lines.append(
+                    f"Unreadable characters: {q.get('junk_percent', '?')}%"
+                )
+
+            st.write("  \n".join(lines))
+
+            st.caption(
+                "A document works here when its text can be selected and "
+                "copied in a PDF reader."
+            )
 
 
 # =========================================================
