@@ -604,9 +604,15 @@ for key, value in DEFAULTS.items():
         st.session_state[key] = value
 
 
-def reset_all():
+def reset_all(clear_upload=True):
+    """Clear the analysed document. Optionally empty the file picker too."""
     for key, value in DEFAULTS.items():
         st.session_state[key] = [] if isinstance(value, list) else value
+
+    if clear_upload:
+        st.session_state["upload_round"] = (
+            st.session_state.get("upload_round", 0) + 1
+        )
 
 
 # =========================================================
@@ -872,7 +878,16 @@ if st.session_state["phase"] == "upload":
 
     st.subheader("Step 1 — Upload your document")
 
-    uploaded_file = st.file_uploader("PDF file", type=["pdf"], key="pdf_upload")
+    # Changing the key is the only reliable way to empty a Streamlit
+    # file picker. Bumping the counter gives a fresh, empty one on
+    # the same page rather than sending the person back a step.
+    if "upload_round" not in st.session_state:
+        st.session_state["upload_round"] = 0
+
+    uploaded_file = st.file_uploader(
+        "PDF file", type=["pdf"],
+        key=f"pdf_upload_{st.session_state['upload_round']}",
+    )
 
     if uploaded_file is not None:
 
@@ -891,9 +906,9 @@ if st.session_state["phase"] == "upload":
             show_progress(
                 slot,
                 [
-                    "Checking the file",
-                    "Reading the text",
-                    "Judging whether it suits an infographic",
+                    "Uploading your file",
+                    "Reading the text out of the PDF",
+                    "Checking the text can be used",
                     "Choosing a layout",
                 ],
                 est=25,
@@ -953,10 +968,10 @@ if st.session_state["phase"] == "upload":
                     "reader."
                 )
 
-                if st.button("Start over", type="primary",
-                             key="reset_after_reject"):
-                    reset_all()
-                    st.session_state.pop("pdf_upload", None)
+                if st.button("Choose a different file", type="primary",
+                             key="reupload_after_reject"):
+                    # empty the picker, stay on this step
+                    st.session_state["upload_round"] += 1
                     st.rerun()
 
                 with st.expander("What the checker found"):
