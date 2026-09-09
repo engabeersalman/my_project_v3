@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import pathlib
 
 import requests
 import streamlit as st
@@ -30,10 +31,24 @@ st.set_page_config(
 
 N8N_BASE = "https://abeersalman7979.app.n8n.cloud/webhook"
 
-ANALYZE_URL = st.secrets.get("ANALYZE_URL", f"{N8N_BASE}/pdf-analyze")
-BUILD_URL = st.secrets.get("BUILD_URL", f"{N8N_BASE}/pdf-infographic")
-RESTYLE_URL = st.secrets.get("RESTYLE_URL", f"{N8N_BASE}/restyle-infographic")
-ASK_URL = st.secrets.get("ASK_URL", f"{N8N_BASE}/ask-pdf")
+
+def secret(name, fallback):
+    """Read a secret, falling back when no secrets file exists.
+
+    Streamlit raises rather than returning a default when there is
+    no secrets.toml at all, which is the normal case when running
+    the app locally.
+    """
+    try:
+        return st.secrets.get(name, fallback)
+    except Exception:
+        return fallback
+
+
+ANALYZE_URL = secret("ANALYZE_URL", f"{N8N_BASE}/pdf-analyze")
+BUILD_URL = secret("BUILD_URL", f"{N8N_BASE}/pdf-infographic")
+RESTYLE_URL = secret("RESTYLE_URL", f"{N8N_BASE}/restyle-infographic")
+ASK_URL = secret("ASK_URL", f"{N8N_BASE}/ask-pdf")
 
 ANALYZE_TIMEOUT = 180
 BUILD_TIMEOUT = 240
@@ -169,6 +184,100 @@ CONTENT_KEYS = ("depth", "audience", "language")
 # the operating system level.
 # =========================================================
 
+# ------------------------------------------------------------
+# Arabic support for the PDF
+#
+# Three things are needed and all three degrade quietly:
+#   a font with Arabic glyphs   (fonts/DejaVuSans.ttf in the repo)
+#   arabic_reshaper             (joins the letters)
+#   python-bidi                 (lays the line out right to left)
+# Without them the PDF still builds, just without Arabic.
+# ------------------------------------------------------------
+
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    SHAPING = True
+except Exception:
+    SHAPING = False
+
+APP_DIR = pathlib.Path(__file__).parent
+
+# The fonts work from a fonts/ folder or from the repo root, so it
+# does not matter which way they were uploaded.
+FONT_DIRS = [APP_DIR / "fonts", APP_DIR, APP_DIR / "assets"]
+
+
+def find_font(filename):
+    for folder in FONT_DIRS:
+        candidate = folder / filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
+ARABIC_FONT = None
+ARABIC_FONT_BOLD = None
+
+try:
+    regular = find_font("DejaVuSans.ttf")
+    bold = find_font("DejaVuSans-Bold.ttf")
+
+    if regular:
+        pdfmetrics.registerFont(TTFont("ArabicBody", str(regular)))
+        ARABIC_FONT = "ArabicBody"
+
+        if bold:
+            pdfmetrics.registerFont(TTFont("ArabicBold", str(bold)))
+            ARABIC_FONT_BOLD = "ArabicBold"
+        else:
+            ARABIC_FONT_BOLD = "ArabicBody"
+except Exception:
+    ARABIC_FONT = None
+    ARABIC_FONT_BOLD = None
+
+
+ARABIC_PDF_READY = bool(ARABIC_FONT and SHAPING)
+
+
+def has_arabic(value):
+    return any("\u0600" <= ch <= "\u06ff" for ch in str(value or ""))
+
+
+def shape_arabic(text, font, size, max_width):
+    """Join the letters, wrap, then flip each line.
+
+    Wrapping has to happen before the flip. Flipping the whole
+    paragraph first and letting the PDF wrap it afterwards puts
+    the lines in reverse order, which reads as nonsense.
+    """
+    shaped = arabic_reshaper.reshape(str(text))
+
+    # Break a little earlier than the true width. If ReportLab ever
+    # has to wrap a line that has already been flipped, it splits it
+    # left to right and the words come out in the wrong order.
+    limit = max(40, max_width - 10)
+
+    lines, current = [], ""
+
+    for word in shaped.split(" "):
+        trial = (current + " " + word).strip()
+        fits = pdfmetrics.stringWidth(trial, font, size) <= limit
+        if not current or fits:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+
+    return "<br/>".join(get_display(line) for line in lines)
+
+
 MOJIBAKE = [
     ("\u00e2\u20ac\u2122", "'"), ("\u00e2\u20ac\u02dc", "'"),
     ("\u00e2\u20ac\u009c", '"'), ("\u00e2\u20ac\u009d", '"'),
@@ -190,8 +299,21 @@ def clean_text(value):
     return s.strip()
 
 
-def _p(text, style):
-    return Paragraph(xml_escape(clean_text(text)), style)
+def _p(text, style, width=None):
+    """Build a paragraph, shaping and flipping it when it is Arabic."""
+
+    cleaned = clean_text(text)
+
+    if ARABIC_PDF_READY and has_arabic(cleaned) and width:
+        try:
+            body = shape_arabic(
+                xml_escape(cleaned), style.fontName, style.fontSize, width
+            )
+            return Paragraph(body, style)
+        except Exception:
+            pass
+
+    return Paragraph(xml_escape(cleaned), style)
 
 
 def build_pdf(data, template_key):
@@ -209,9 +331,28 @@ def build_pdf(data, template_key):
     page_w, page_h = A4
     content_w = page_w - 2 * margin
 
+    # Is this document Arabic? If so the whole page flips.
+    arabic = has_arabic(
+        " ".join([
+            str(data.get("title") or ""),
+            str(data.get("subtitle") or ""),
+            str(data.get("summary") or ""),
+        ])
+    )
+
+    use_arabic = arabic and ARABIC_PDF_READY
+
+    body_font = ARABIC_FONT if use_arabic else "Helvetica"
+    bold_font = ARABIC_FONT_BOLD if use_arabic else "Helvetica-Bold"
+
+    # 2 is right aligned, which is where Arabic text starts
+    align = 2 if use_arabic else 0
+
     def style(name, **kw):
-        base = dict(name=name, fontName="Helvetica", fontSize=10,
-                    leading=15, textColor=ink)
+        base = dict(name=name, fontName=body_font, fontSize=10,
+                    leading=15, textColor=ink, alignment=align)
+        if kw.get("fontName") == "Helvetica-Bold":
+            kw["fontName"] = bold_font
         base.update(kw)
         return ParagraphStyle(**base)
 
@@ -230,6 +371,9 @@ def build_pdf(data, template_key):
     s_cite = style("cite", fontSize=8, leading=11, textColor=muted)
     s_date = style("date", fontName="Helvetica-Bold", fontSize=9, leading=13)
 
+    HEAD_TIMELINE = "\u0627\u0644\u062a\u0633\u0644\u0633\u0644 \u0627\u0644\u0632\u0645\u0646\u064a" if arabic else "How it unfolded"
+    HEAD_TAKEAWAYS = "\u0623\u0628\u0631\u0632 \u0627\u0644\u0646\u0642\u0627\u0637" if arabic else "What to remember"
+
     flow = []
 
     # ---------- masthead ----------
@@ -245,24 +389,25 @@ def build_pdf(data, template_key):
         line = clean_text(meta["filename"])
         if bits:
             line += " - " + ", ".join(bits)
-        flow.append(_p(line, s_meta))
+        flow.append(_p(line, s_meta, content_w))
         flow.append(Spacer(1, 5 * mm))
 
-    flow.append(_p(data.get("title") or "Untitled", s_title))
+    flow.append(_p(data.get("title") or "Untitled", s_title, content_w))
     flow.append(Spacer(1, 2.5 * mm))
     flow.append(HRFlowable(width="38%", thickness=3, color=accent,
-                           spaceAfter=6, hAlign="LEFT"))
+                           spaceAfter=6,
+                           hAlign="RIGHT" if use_arabic else "LEFT"))
 
     if data.get("subtitle"):
         flow.append(Spacer(1, 2 * mm))
-        flow.append(_p(data["subtitle"], s_sub))
+        flow.append(_p(data["subtitle"], s_sub, content_w))
 
     flow.append(Spacer(1, 6 * mm))
     flow.append(HRFlowable(width="100%", thickness=0.8, color=ink,
                            spaceAfter=8))
 
     if data.get("summary"):
-        flow.append(_p(data["summary"], s_body))
+        flow.append(_p(data["summary"], s_body, content_w))
         flow.append(Spacer(1, 7 * mm))
 
     # ---------- blocks ----------
@@ -283,11 +428,11 @@ def build_pdf(data, template_key):
                 value = clean_text(st.get("value"))
                 unit = clean_text(st.get("unit"))
                 inner = [
-                    _p(f"{value} {unit}".strip(), s_stat_v),
+                    _p(f"{value} {unit}".strip(), s_stat_v, cell_w - 16),
                     Spacer(1, 1.5 * mm),
-                    _p(st.get("label"), s_stat_l),
+                    _p(st.get("label"), s_stat_l, cell_w - 16),
                     Spacer(1, 1.5 * mm),
-                    _p(st.get("source_quote"), s_cite),
+                    _p(st.get("source_quote"), s_cite, cell_w - 16),
                 ]
                 cells.append(inner)
             while len(cells) < cols:
@@ -317,12 +462,15 @@ def build_pdf(data, template_key):
 
         rows = []
         for sec in sections:
-            rows.append([
-                _p(sec.get("heading"), s_note_h),
-                _p(sec.get("text"), s_body),
-            ])
+            cells = [
+                _p(sec.get("heading"), s_note_h, 44 * mm),
+                _p(sec.get("text"), s_body, content_w - 50 * mm),
+            ]
+            # Arabic reads right to left, so the heading column moves
+            rows.append(cells[::-1] if use_arabic else cells)
 
-        tbl = Table(rows, colWidths=[46 * mm, content_w - 46 * mm])
+        widths = [46 * mm, content_w - 46 * mm]
+        tbl = Table(rows, colWidths=widths[::-1] if use_arabic else widths)
         tbl.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LINEABOVE", (0, 0), (-1, -1), 0.4, rule),
@@ -339,10 +487,14 @@ def build_pdf(data, template_key):
         if not events:
             return []
 
-        rows = [[_p(e.get("date"), s_date), _p(e.get("event"), s_body)]
-                for e in events]
+        rows = []
+        for e in events:
+            cells = [_p(e.get("date"), s_date, 32 * mm),
+                     _p(e.get("event"), s_body, content_w - 40 * mm)]
+            rows.append(cells[::-1] if use_arabic else cells)
 
-        tbl = Table(rows, colWidths=[34 * mm, content_w - 34 * mm])
+        tw = [34 * mm, content_w - 34 * mm]
+        tbl = Table(rows, colWidths=tw[::-1] if use_arabic else tw)
         tbl.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LINEABOVE", (0, 0), (-1, -1), 0.4, rule),
@@ -351,7 +503,7 @@ def build_pdf(data, template_key):
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
             ("RIGHTPADDING", (0, 0), (0, -1), 8),
         ]))
-        return [KeepTogether([_p("How it unfolded", s_head), tbl]),
+        return [KeepTogether([_p(HEAD_TIMELINE, s_head, content_w), tbl]),
                 Spacer(1, 7 * mm)]
 
     def block_takeaways():
@@ -369,16 +521,18 @@ def build_pdf(data, template_key):
                 ("TOPPADDING", (0, 0), (-1, -1), 0),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
             ]))
-            rows.append([marker, _p(item, s_body)])
+            cells = [marker, _p(item, s_body, content_w - 12 * mm)]
+            rows.append(cells[::-1] if use_arabic else cells)
 
-        tbl = Table(rows, colWidths=[9 * mm, content_w - 9 * mm])
+        bw = [9 * mm, content_w - 9 * mm]
+        tbl = Table(rows, colWidths=bw[::-1] if use_arabic else bw)
         tbl.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("TOPPADDING", (0, 0), (-1, -1), 4),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ]))
-        return [KeepTogether([_p("What to remember", s_head), tbl]),
+        return [KeepTogether([_p(HEAD_TAKEAWAYS, s_head, content_w), tbl]),
                 Spacer(1, 5 * mm)]
 
     builders = {
@@ -641,7 +795,8 @@ def print_button(html, label="Open print view", present=False):
     uid = hashlib.md5((encoded + str(present)).encode()).hexdigest()[:8]
 
     after = "" if present else (
-        "setTimeout(function () { w.focus(); w.print(); }, 900);"
+        "setTimeout(function () { try { w.focus(); w.print(); } "
+        "catch (e) {} }, 1200);"
     )
 
     components.html(
@@ -653,11 +808,17 @@ def print_button(html, label="Open print view", present=False):
   color: inherit;">{label}</button>
 <script>
   document.getElementById('p{uid}').onclick = function () {{
-    var html = atob("{encoded}");
-    var w = window.open('', '_blank');
-    w.document.write(html);
-    w.document.close();
-    w.focus();
+    // atob gives bytes, not text. Decoding them as UTF-8 is what
+    // keeps Arabic readable instead of turning it into mojibake.
+    var raw = atob("{encoded}");
+    var bytes = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+
+    var blob = new Blob([bytes], {{ type: 'text/html;charset=utf-8' }});
+    var url = URL.createObjectURL(blob);
+
+    var w = window.open(url, '_blank');
+    if (w) {{ w.focus(); }}
     {after}
   }};
 </script>
