@@ -52,18 +52,17 @@ MAX_UPLOAD_MB = 20
 # never simply disappears.
 # =========================================================
 
-try:
-    from weasyprint import HTML as WeasyHTML
-    PDF_ENGINE = "weasyprint"
-except Exception:
-    WeasyHTML = None
-    PDF_ENGINE = None
+from io import BytesIO
 
-
-@st.cache_data(show_spinner=False)
-def html_to_pdf(html: str) -> bytes:
-    """Render the infographic HTML to PDF bytes. Cached by content."""
-    return WeasyHTML(string=html).write_pdf()
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors as rl_colors
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    HRFlowable, KeepTogether,
+)
+from xml.sax.saxutils import escape as xml_escape
 
 
 # =========================================================
@@ -80,36 +79,56 @@ TEMPLATES = {
         "blurb": "Highlighter marks on warm paper, serif headlines. "
                  "The safe default for reports and articles.",
         "best": "Reports, articles, general documents",
+        # palette and block order, kept in step with the n8n builder
+        "ink": "#10131c", "paper": "#fbfaf7", "accent": "#d8f35c",
+        "rule": "#c9c6bc", "muted": "#57554e", "dark": False,
+        "order": ["stats", "sections", "timeline", "takeaways"],
     },
     "poster": {
         "label": "Bold Poster",
         "blurb": "Heavy type and solid accent blocks, with the takeaways "
                  "pulled to the top.",
         "best": "Announcements, pitches, one-page summaries",
+        "ink": "#141414", "paper": "#ffffff", "accent": "#ff5a3c",
+        "rule": "#d4d4d4", "muted": "#5a5a5a", "dark": False,
+        "order": ["takeaways", "stats", "sections", "timeline"],
     },
     "brief": {
         "label": "Minimal Brief",
         "blurb": "All serif, no highlighter, generous whitespace. Prose "
                  "sections lead.",
         "best": "Academic papers, legal text, dense writing",
+        "ink": "#22201d", "paper": "#ffffff", "accent": "#a8a49b",
+        "rule": "#e6e4de", "muted": "#6b675f", "dark": False,
+        "order": ["sections", "stats", "timeline", "takeaways"],
     },
     "dashboard": {
         "label": "Data Dashboard",
         "blurb": "Cool blue-grey ground with oversized figures at the top.",
         "best": "Financial reports, surveys, anything number-heavy",
+        "ink": "#0a1628", "paper": "#f4f7fb", "accent": "#2dd4bf",
+        "rule": "#ccd6e2", "muted": "#4a5a70", "dark": False,
+        "order": ["stats", "sections", "timeline", "takeaways"],
     },
     "timeline": {
         "label": "Timeline Story",
         "blurb": "A vertical rail of dated events, placed before everything "
                  "else.",
         "best": "Histories, project retrospectives, case studies",
+        "ink": "#16161d", "paper": "#f6f5f2", "accent": "#5b6ef5",
+        "rule": "#dbd9d2", "muted": "#5c5a63", "dark": False,
+        "order": ["timeline", "sections", "stats", "takeaways"],
     },
     "blueprint": {
         "label": "Technical Blueprint",
         "blurb": "Dark navy ground with cyan accents and precise labelling.",
         "best": "Specifications, engineering docs, technical manuals",
+        "ink": "#dfe7ef", "paper": "#0d1b2a", "accent": "#4cc9f0",
+        "rule": "#20384f", "muted": "#8ba3bb", "dark": True,
+        "order": ["sections", "stats", "timeline", "takeaways"],
     },
 }
+
 
 DEPTHS = {
     "Brief — 2 to 3 sections": "brief",
@@ -132,6 +151,274 @@ LANGUAGES = {
 
 # Changing any of these needs a new OpenAI call.
 CONTENT_KEYS = ("depth", "audience", "language")
+
+
+
+# =========================================================
+# PDF EXPORT
+#
+# Built directly from the structured content with ReportLab,
+# not by printing the web page. That means the download is a
+# real, instant PDF file with no browser dialog, and it uses
+# the same palette as the template on screen.
+#
+# ReportLab is pure Python, so nothing has to be installed at
+# the operating system level.
+# =========================================================
+
+MOJIBAKE = [
+    ("\u00e2\u20ac\u2122", "'"), ("\u00e2\u20ac\u02dc", "'"),
+    ("\u00e2\u20ac\u009c", '"'), ("\u00e2\u20ac\u009d", '"'),
+    ("\u00e2\u20ac\u0153", '"'), ("\u00e2\u20ac\u201d", "\u2014"),
+    ("\u00e2\u20ac\u201c", "\u2013"), ("\u00e2\u20ac\u00a2", "\u2022"),
+    ("\u00e2\u20ac\u00a6", "\u2026"), ("\u00e2\u20ac", '"'),
+    ("\u00c2\u00a0", " "), ("\u00c3\u00a9", "\u00e9"),
+    ("\u00c3\u00a8", "\u00e8"), ("\u00c3\u00a1", "\u00e1"),
+    ("\u00c3\u00b3", "\u00f3"), ("\u00c3\u00bc", "\u00fc"),
+]
+
+
+def clean_text(value):
+    """Repair the mojibake that PDF text extraction sometimes produces."""
+    s = "" if value is None else str(value)
+    if any(m in s for m in ("\u00e2", "\u00c2", "\u00c3")):
+        for bad, good in MOJIBAKE:
+            s = s.replace(bad, good)
+    return s.strip()
+
+
+def _p(text, style):
+    return Paragraph(xml_escape(clean_text(text)), style)
+
+
+def build_pdf(data, template_key):
+    """Render the infographic content as a real PDF. Returns bytes."""
+
+    t = TEMPLATES.get(template_key, TEMPLATES["editorial"])
+
+    ink = rl_colors.HexColor(t["ink"])
+    paper = rl_colors.HexColor(t["paper"])
+    accent = rl_colors.HexColor(t["accent"])
+    rule = rl_colors.HexColor(t["rule"])
+    muted = rl_colors.HexColor(t["muted"])
+
+    margin = 18 * mm
+    page_w, page_h = A4
+    content_w = page_w - 2 * margin
+
+    def style(name, **kw):
+        base = dict(name=name, fontName="Helvetica", fontSize=10,
+                    leading=15, textColor=ink)
+        base.update(kw)
+        return ParagraphStyle(**base)
+
+    s_meta = style("meta", fontSize=8.5, leading=12, textColor=muted)
+    s_title = style("title", fontName="Helvetica-Bold", fontSize=26,
+                    leading=30)
+    s_sub = style("sub", fontSize=13, leading=18, textColor=muted)
+    s_body = style("body", fontSize=10.5, leading=16)
+    s_head = style("head", fontName="Helvetica-Bold", fontSize=15,
+                   leading=19, spaceBefore=4, spaceAfter=8)
+    s_note_h = style("noteh", fontName="Helvetica-Bold", fontSize=11,
+                     leading=14)
+    s_stat_v = style("statv", fontName="Helvetica-Bold", fontSize=21,
+                     leading=24)
+    s_stat_l = style("statl", fontSize=9, leading=12)
+    s_cite = style("cite", fontSize=8, leading=11, textColor=muted)
+    s_date = style("date", fontName="Helvetica-Bold", fontSize=9, leading=13)
+
+    flow = []
+
+    # ---------- masthead ----------
+
+    meta = data.get("meta") or {}
+    bits = []
+    if meta.get("page_count"):
+        bits.append(f"{meta['page_count']} pages")
+    if meta.get("word_count"):
+        bits.append(f"{meta['word_count']:,} words")
+
+    if meta.get("filename"):
+        line = clean_text(meta["filename"])
+        if bits:
+            line += " - " + ", ".join(bits)
+        flow.append(_p(line, s_meta))
+        flow.append(Spacer(1, 5 * mm))
+
+    flow.append(_p(data.get("title") or "Untitled", s_title))
+    flow.append(Spacer(1, 2.5 * mm))
+    flow.append(HRFlowable(width="38%", thickness=3, color=accent,
+                           spaceAfter=6, hAlign="LEFT"))
+
+    if data.get("subtitle"):
+        flow.append(Spacer(1, 2 * mm))
+        flow.append(_p(data["subtitle"], s_sub))
+
+    flow.append(Spacer(1, 6 * mm))
+    flow.append(HRFlowable(width="100%", thickness=0.8, color=ink,
+                           spaceAfter=8))
+
+    if data.get("summary"):
+        flow.append(_p(data["summary"], s_body))
+        flow.append(Spacer(1, 7 * mm))
+
+    # ---------- blocks ----------
+
+    def block_stats():
+        stats = data.get("key_stats") or []
+        if not stats:
+            return []
+
+        out = []
+        cols = min(len(stats), 3)
+        cell_w = content_w / cols
+
+        for start in range(0, len(stats), cols):
+            row = stats[start:start + cols]
+            cells = []
+            for st in row:
+                value = clean_text(st.get("value"))
+                unit = clean_text(st.get("unit"))
+                inner = [
+                    _p(f"{value} {unit}".strip(), s_stat_v),
+                    Spacer(1, 1.5 * mm),
+                    _p(st.get("label"), s_stat_l),
+                    Spacer(1, 1.5 * mm),
+                    _p(st.get("source_quote"), s_cite),
+                ]
+                cells.append(inner)
+            while len(cells) < cols:
+                cells.append([Spacer(1, 1)])
+
+            tbl = Table([cells], colWidths=[cell_w] * cols)
+            tbl.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LINEABOVE", (0, 0), (-1, 0), 0.8, ink),
+                ("LINEBELOW", (0, 0), (-1, -1), 0.8, ink),
+                ("LINEBEFORE", (1, 0), (-1, -1), 0.4, rule),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+                ("LEFTPADDING", (0, 0), (0, -1), 0),
+                ("LEFTPADDING", (1, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            ]))
+            out.append(tbl)
+            out.append(Spacer(1, 5 * mm))
+
+        return out
+
+    def block_sections():
+        sections = data.get("sections") or []
+        if not sections:
+            return []
+
+        rows = []
+        for sec in sections:
+            rows.append([
+                _p(sec.get("heading"), s_note_h),
+                _p(sec.get("text"), s_body),
+            ])
+
+        tbl = Table(rows, colWidths=[46 * mm, content_w - 46 * mm])
+        tbl.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LINEABOVE", (0, 0), (-1, -1), 0.4, rule),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (0, -1), 0),
+            ("RIGHTPADDING", (0, 0), (0, -1), 8),
+            ("LEFTPADDING", (1, 0), (-1, -1), 0),
+        ]))
+        return [tbl, Spacer(1, 7 * mm)]
+
+    def block_timeline():
+        events = data.get("timeline") or []
+        if not events:
+            return []
+
+        rows = [[_p(e.get("date"), s_date), _p(e.get("event"), s_body)]
+                for e in events]
+
+        tbl = Table(rows, colWidths=[34 * mm, content_w - 34 * mm])
+        tbl.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LINEABOVE", (0, 0), (-1, -1), 0.4, rule),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (0, -1), 8),
+        ]))
+        return [KeepTogether([_p("How it unfolded", s_head), tbl]),
+                Spacer(1, 7 * mm)]
+
+    def block_takeaways():
+        items = data.get("takeaways") or []
+        if not items:
+            return []
+
+        rows = []
+        for item in items:
+            marker = Table([[""]], colWidths=[3.2 * mm], rowHeights=[3.2 * mm])
+            marker.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), accent),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]))
+            rows.append([marker, _p(item, s_body)])
+
+        tbl = Table(rows, colWidths=[9 * mm, content_w - 9 * mm])
+        tbl.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        return [KeepTogether([_p("What to remember", s_head), tbl]),
+                Spacer(1, 5 * mm)]
+
+    builders = {
+        "stats": block_stats,
+        "sections": block_sections,
+        "timeline": block_timeline,
+        "takeaways": block_takeaways,
+    }
+
+    # each template lays its blocks out in its own order
+    for name in t.get("order", ["stats", "sections", "timeline", "takeaways"]):
+        flow.extend(builders[name]())
+
+    # ---------- page furniture ----------
+
+    def decorate(canvas, doc):
+        canvas.saveState()
+        if t["dark"] or t["paper"].lower() != "#ffffff":
+            canvas.setFillColor(paper)
+            canvas.rect(0, 0, page_w, page_h, fill=1, stroke=0)
+        canvas.setFont("Helvetica", 7.5)
+        canvas.setFillColor(muted)
+        canvas.drawRightString(page_w - margin, 11 * mm, str(doc.page))
+        canvas.restoreState()
+
+    buffer = BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        leftMargin=margin, rightMargin=margin,
+        topMargin=margin, bottomMargin=20 * mm,
+        title=clean_text(data.get("title") or "Infographic"),
+    )
+
+    doc.build(flow, onFirstPage=decorate, onLaterPages=decorate)
+
+    return buffer.getvalue()
+
+
+@st.cache_data(show_spinner=False)
+def cached_pdf(payload_key, data, template_key):
+    """Cache by a small key so the PDF is built once per result."""
+    return build_pdf(data, template_key)
 
 
 # =========================================================
@@ -782,25 +1069,27 @@ else:
                 )
 
             with col_pdf:
-                if PDF_ENGINE == "weasyprint":
-                    try:
-                        pdf_bytes = html_to_pdf(html)
-                        st.download_button(
-                            "Download PDF",
-                            data=pdf_bytes,
-                            file_name=f"{stem}_infographic.pdf",
-                            mime="application/pdf",
-                            use_container_width=True,
-                        )
-                    except Exception as exc:
-                        st.caption(f"PDF export failed: {exc}")
-                        print_button(html, "Save as PDF (via browser)")
-                else:
-                    print_button(html, "Save as PDF (via browser)")
-                    st.caption(
-                        "Opens the infographic in a new tab and starts the "
-                        "print dialog. Choose *Save as PDF*."
+                # Built from the content, not printed from the page,
+                # so it downloads straight away with no browser dialog.
+                try:
+                    key = f"{stem}|{used.get('template')}|{len(html)}"
+                    pdf_bytes = cached_pdf(key, result, used.get("template"))
+
+                    st.download_button(
+                        "Download PDF",
+                        data=pdf_bytes,
+                        file_name=f"{stem}_infographic.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
                     )
+                except Exception as exc:
+                    st.caption(f"PDF export failed: {exc}")
+                    print_button(html, "Save as PDF (via browser)")
+
+            st.caption(
+                "The PDF is generated as a proper A4 document in the same "
+                "colours as the template on screen."
+            )
 
     # --- TAB 2 -------------------------------------------
 
