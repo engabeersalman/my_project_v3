@@ -1377,9 +1377,9 @@ else:
         document_text = st.session_state["document_text"]
 
         st.caption(
-            "The agent only answers from this document. Anything else gets "
-            "a polite refusal, labelled so you can see how it classified "
-            "your question."
+            "Your question is checked first. Only if it is about this "
+            "document does the agent go and read it. Anything else gets a "
+            "polite refusal, labelled so you can see how it was classified."
         )
 
         # colours for the badge above a non-answer
@@ -1462,7 +1462,14 @@ else:
         if question and question.strip():
 
             slot = st.empty()
-            show_progress(slot, ["Checking the document"], est=8)
+            show_progress(
+                slot,
+                [
+                    "Checking your question",
+                    "Looking in the document",
+                ],
+                est=9,
+            )
 
             data, error = call_n8n(
                 ASK_URL,
