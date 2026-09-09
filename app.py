@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import pathlib
 
 import requests
@@ -612,8 +613,32 @@ def reset_all():
 # NETWORK
 # =========================================================
 
+def friendly_error(raw):
+    """Pull the readable sentence out of an n8n error payload.
+
+    A rejected PDF comes back as JSON with the explanation buried
+    inside it. Showing the whole blob helps nobody, so the message
+    itself is extracted when it is there.
+    """
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+
+    for key in ("message", "error", "description"):
+        value = data.get(key) if isinstance(data, dict) else None
+        if isinstance(value, str) and len(value) > 20:
+            # n8n prefixes the node name, which is noise for the user
+            return value.split("[line", 1)[0].strip()
+
+    return None
+
+
 def read_response(response):
     if response.status_code != 200:
+        nice = friendly_error(response.text)
+        if nice:
+            return None, nice
         return None, (
             f"n8n returned status {response.status_code}.\n\n"
             f"{response.text[:1000]}"
@@ -886,6 +911,12 @@ if st.session_state["phase"] == "upload":
 
             if error:
                 st.error(error)
+                st.caption(
+                    "A document works here when its text can be selected "
+                    "and copied in a PDF reader. If the text is really a "
+                    "picture, or the file was exported without its fonts, "
+                    "there is nothing readable for the agent to work from."
+                )
             else:
                 st.session_state["profile"] = data.get("profile") or {}
                 st.session_state["document_text"] = data.get("document_text")
