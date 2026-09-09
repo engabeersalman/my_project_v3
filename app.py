@@ -75,54 +75,58 @@ from xml.sax.saxutils import escape as xml_escape
 
 TEMPLATES = {
     "editorial": {
-        "label": "Editorial Report",
-        "blurb": "Highlighter marks on warm paper, serif headlines. "
-                 "The safe default for reports and articles.",
-        "best": "Reports, articles, general documents",
+        "label": "Report",
+        "blurb": "A clean article layout. The safe choice for most documents.",
+        "best": "Reports, articles, anything general",
         # palette and block order, kept in step with the n8n builder
         "ink": "#10131c", "paper": "#fbfaf7", "accent": "#d8f35c",
         "rule": "#c9c6bc", "muted": "#57554e", "dark": False,
         "order": ["stats", "sections", "timeline", "takeaways"],
     },
     "poster": {
-        "label": "Bold Poster",
-        "blurb": "Heavy type and solid accent blocks, with the takeaways "
-                 "pulled to the top.",
+        "label": "Big Poster",
+        "blurb": "Large bold type. The key points go at the top.",
         "best": "Announcements, pitches, one-page summaries",
         "ink": "#141414", "paper": "#ffffff", "accent": "#ff5a3c",
         "rule": "#d4d4d4", "muted": "#5a5a5a", "dark": False,
         "order": ["takeaways", "stats", "sections", "timeline"],
     },
     "brief": {
-        "label": "Minimal Brief",
-        "blurb": "All serif, no highlighter, generous whitespace. Prose "
-                 "sections lead.",
+        "label": "Plain Text",
+        "blurb": "Quiet and simple. No colour, no highlights, easy to read.",
         "best": "Academic papers, legal text, dense writing",
         "ink": "#22201d", "paper": "#ffffff", "accent": "#a8a49b",
         "rule": "#e6e4de", "muted": "#6b675f", "dark": False,
         "order": ["sections", "stats", "timeline", "takeaways"],
     },
     "dashboard": {
-        "label": "Data Dashboard",
-        "blurb": "Cool blue-grey ground with oversized figures at the top.",
-        "best": "Financial reports, surveys, anything number-heavy",
+        "label": "Numbers First",
+        "blurb": "Big figures at the top, on a cool blue-grey background.",
+        "best": "Financial reports, surveys, anything with figures",
         "ink": "#0a1628", "paper": "#f4f7fb", "accent": "#2dd4bf",
         "rule": "#ccd6e2", "muted": "#4a5a70", "dark": False,
         "order": ["stats", "sections", "timeline", "takeaways"],
     },
     "timeline": {
-        "label": "Timeline Story",
-        "blurb": "A vertical rail of dated events, placed before everything "
-                 "else.",
-        "best": "Histories, project retrospectives, case studies",
+        "label": "Timeline",
+        "blurb": "Dated events on a vertical line, shown before everything else.",
+        "best": "Histories, project reviews, case studies",
         "ink": "#16161d", "paper": "#f6f5f2", "accent": "#5b6ef5",
         "rule": "#dbd9d2", "muted": "#5c5a63", "dark": False,
         "order": ["timeline", "sections", "stats", "takeaways"],
     },
+    "presentation": {
+        "label": "Moving Presentation",
+        "blurb": "Not a page. It zooms from point to point as you press the arrow keys.",
+        "best": "Presenting to an audience, demos",
+        "ink": "#f2eee7", "paper": "#171426", "accent": "#ffb454",
+        "rule": "#332d4d", "muted": "#a49bbd", "dark": True,
+        "order": ["stats", "sections", "timeline", "takeaways"],
+    },
     "blueprint": {
-        "label": "Technical Blueprint",
-        "blurb": "Dark navy ground with cyan accents and precise labelling.",
-        "best": "Specifications, engineering docs, technical manuals",
+        "label": "Dark Technical",
+        "blurb": "Dark navy background with bright labelling.",
+        "best": "Specifications, engineering documents, manuals",
         "ink": "#dfe7ef", "paper": "#0d1b2a", "accent": "#4cc9f0",
         "rule": "#20384f", "muted": "#8ba3bb", "dark": True,
         "order": ["sections", "stats", "timeline", "takeaways"],
@@ -144,9 +148,8 @@ AUDIENCES = {
 }
 
 LANGUAGES = {
-    "Same as the document": "auto",
     "English": "english",
-    "Arabic": "arabic",
+    "العربية  (Arabic)": "arabic",
 }
 
 # Changing any of these needs a new OpenAI call.
@@ -627,10 +630,19 @@ def what_changed(current, built):
     return "none"
 
 
-def print_button(html, label="Open print view"):
-    """Fallback PDF route: open the infographic and call print()."""
+def print_button(html, label="Open print view", present=False):
+    """Open the infographic in a new tab.
+
+    present=False also triggers the print dialog, which is the
+    fallback route to a PDF. present=True just opens it, which is
+    what the zooming presentation needs.
+    """
     encoded = base64.b64encode(html.encode("utf-8")).decode("ascii")
-    uid = hashlib.md5(encoded.encode()).hexdigest()[:8]
+    uid = hashlib.md5((encoded + str(present)).encode()).hexdigest()[:8]
+
+    after = "" if present else (
+        "setTimeout(function () { w.focus(); w.print(); }, 900);"
+    )
 
     components.html(
         f"""
@@ -645,7 +657,8 @@ def print_button(html, label="Open print view"):
     var w = window.open('', '_blank');
     w.document.write(html);
     w.document.close();
-    setTimeout(function () {{ w.focus(); w.print(); }}, 900);
+    w.focus();
+    {after}
   }};
 </script>
 """,
@@ -796,7 +809,14 @@ elif st.session_state["phase"] == "choose":
         with col_b:
             audience = AUDIENCES[st.selectbox("Written for", list(AUDIENCES.keys()), index=0)]
         with col_c:
-            language = LANGUAGES[st.selectbox("Language", list(LANGUAGES.keys()), index=0)]
+            # default to the language the agent found in the document
+            lang_values = list(LANGUAGES.values())
+            detected = (profile.get("language") or "").strip().lower()
+            default_lang = 1 if detected.startswith(("ar", "\u0639")) else 0
+
+            language = LANGUAGES[st.selectbox(
+                "Language", list(LANGUAGES.keys()), index=default_lang
+            )]
 
         use_accent = st.checkbox("Custom highlight colour")
         accent = st.color_picker("Highlight", "#5b6ef5") if use_accent else None
@@ -924,7 +944,9 @@ else:
         lang_keys = list(LANGUAGES.keys())
         language = LANGUAGES[st.selectbox(
             "Language", lang_keys,
-            index=[LANGUAGES[k] for k in lang_keys].index(built.get("language", "auto")),
+            index=max(0, [LANGUAGES[k] for k in lang_keys]
+                      .index(built["language"])
+                      if built.get("language") in LANGUAGES.values() else 0),
         )]
 
         current_options = {
@@ -1043,13 +1065,25 @@ else:
                 "Builder node in n8n."
             )
         else:
+            is_presentation = used.get("template") == "presentation"
+
             st.caption(f"Template: {used.get('label', '—')}")
+
+            if is_presentation:
+                st.info(
+                    "Use the arrow keys, or click the stage, to move between "
+                    "points. It looks best fullscreen — the button is below "
+                    "the frame."
+                )
 
             components.html(
                 html,
-                height=estimate_height(result),
-                scrolling=True,
+                height=680 if is_presentation else estimate_height(result),
+                scrolling=not is_presentation,
             )
+
+            if is_presentation:
+                print_button(html, "Open fullscreen", present=True)
 
             st.divider()
 
@@ -1146,6 +1180,10 @@ else:
     #
     # A normal chat: oldest at the top, newest at the bottom,
     # and the input box pinned underneath the conversation.
+    #
+    # Arabic replies are laid out right to left, and the badge
+    # and captions come back from n8n already in the language
+    # of the question, so nothing switches mid conversation.
     # -----------------------------------------------------
 
     with tab_ask:
@@ -1158,12 +1196,36 @@ else:
             "your question."
         )
 
-        # colours for the small badge above a non-answer
+        # colours for the badge above a non-answer
         BADGE = {
             "ok":   ("#0f766e", "#ccfbf1"),
             "warn": ("#92400e", "#fef3c7"),
             "stop": ("#991b1b", "#fee2e2"),
         }
+
+        def is_arabic(text):
+            return any("\u0600" <= ch <= "\u06ff" for ch in str(text))
+
+        def rtl_block(text, size="1rem", colour=None, italic=False):
+            """Render a paragraph in the correct direction."""
+            direction = "rtl" if is_arabic(text) else "ltr"
+            align = "right" if direction == "rtl" else "left"
+            style = (
+                f"direction:{direction};text-align:{align};"
+                f"font-size:{size};line-height:1.7;"
+            )
+            if colour:
+                style += f"color:{colour};"
+            if italic:
+                style += "font-style:italic;"
+            safe = (
+                str(text)
+                .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            )
+            st.markdown(
+                f"<div style='{style}'>{safe}</div>",
+                unsafe_allow_html=True,
+            )
 
         history = st.session_state["history"]
 
@@ -1171,31 +1233,41 @@ else:
             with st.chat_message("assistant"):
                 st.write(
                     f"Ask me anything about **{result.get('title') or 'this document'}**. "
-                    "I only answer from the PDF you uploaded."
+                    "I only answer from the PDF you uploaded, in whichever "
+                    "language you ask."
                 )
 
         # oldest first, so the newest reply is always at the bottom
-        for asked, answer, category, label, tone, quote in history:
+        for entry in history:
+
+            asked, answer, category, label, tone, quote, source_label = entry
 
             with st.chat_message("user"):
-                st.write(asked)
+                rtl_block(asked)
 
             with st.chat_message("assistant"):
 
                 if category != "answered":
                     fg, bg = BADGE.get(tone, BADGE["warn"])
+                    side = "right" if is_arabic(answer) else "left"
                     st.markdown(
+                        f"<div style='text-align:{side}'>"
                         f"<span style='background:{bg};color:{fg};"
-                        "padding:2px 9px;border-radius:999px;font-size:12px;"
-                        f"font-weight:600'>{label}</span>",
+                        "padding:2px 10px;border-radius:999px;font-size:12px;"
+                        f"font-weight:600'>{label}</span></div>",
                         unsafe_allow_html=True,
                     )
                     st.write("")
 
-                st.write(answer)
+                rtl_block(answer)
 
                 if quote:
-                    st.caption(f"From the document: {quote}")
+                    rtl_block(
+                        f"{source_label}: {quote}",
+                        size="0.82rem",
+                        colour="#6b7280",
+                        italic=True,
+                    )
 
         # --- the input sits below the conversation ---
 
@@ -1212,7 +1284,7 @@ else:
                 payload={
                     "question": question.strip(),
                     "document_text": document_text,
-                    "doc_title": result.get("title") or "this document",
+                    "doc_title": result.get("title") or "",
                 },
             )
 
@@ -1229,5 +1301,6 @@ else:
                     data.get("category_label", "Unknown"),
                     data.get("tone", "warn"),
                     data.get("source_quote", ""),
+                    data.get("source_label", "From the document"),
                 ))
                 st.rerun()
