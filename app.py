@@ -1008,6 +1008,18 @@ else:
                 st.error(error)
             else:
                 st.session_state["html"] = data.get("html")
+
+                # keep the stored result in step with what is on screen,
+                # otherwise the caption and the layout stay on the old
+                # template even though the HTML has changed
+                if st.session_state["result"] is not None:
+                    st.session_state["result"]["template_used"] = (
+                        data.get("template_used")
+                        or {"template": template,
+                            "label": TEMPLATES[template]["label"],
+                            "accent": accent}
+                    )
+
                 st.session_state["built_options"] = dict(current_options)
                 st.rerun()
 
@@ -1104,8 +1116,14 @@ else:
                 # Built from the content, not printed from the page,
                 # so it downloads straight away with no browser dialog.
                 try:
-                    key = f"{stem}|{used.get('template')}|{len(html)}"
-                    pdf_bytes = cached_pdf(key, result, used.get("template"))
+                    # a moving presentation cannot print, so its PDF is
+                    # rendered as the ordinary Report layout instead
+                    pdf_template = used.get("template")
+                    if pdf_template == "presentation":
+                        pdf_template = "editorial"
+
+                    key = f"{stem}|{pdf_template}|{len(html)}"
+                    pdf_bytes = cached_pdf(key, result, pdf_template)
 
                     st.download_button(
                         "Download PDF",
@@ -1118,10 +1136,17 @@ else:
                     st.caption(f"PDF export failed: {exc}")
                     print_button(html, "Save as PDF (via browser)")
 
-            st.caption(
-                "The PDF is generated as a proper A4 document in the same "
-                "colours as the template on screen."
-            )
+            if is_presentation:
+                st.caption(
+                    "The HTML download keeps the movement. The PDF cannot, "
+                    "so it is produced as an ordinary printable page with "
+                    "the same content."
+                )
+            else:
+                st.caption(
+                    "The PDF is generated as a proper A4 document in the "
+                    "same colours as the template on screen."
+                )
 
     # --- TAB 2 -------------------------------------------
 
