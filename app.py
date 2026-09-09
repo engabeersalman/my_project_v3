@@ -946,18 +946,49 @@ if st.session_state["phase"] == "upload":
 
                 st.write("")
 
+                # A clear next step, so the screen is not a dead end
+                st.info(
+                    "Please upload a different PDF. Choose one whose text "
+                    "you can select and copy when you open it in a PDF "
+                    "reader."
+                )
+
+                if st.button("Start over", type="primary",
+                             key="reset_after_reject"):
+                    reset_all()
+                    st.session_state.pop("pdf_upload", None)
+                    st.rerun()
+
                 with st.expander("What the checker found"):
                     q = data.get("quality") or {}
-                    m = data.get("meta") or {}
-                    st.write(
-                        f"Pages: {m.get('page_count', '?')}  \n"
-                        f"Readable words: {q.get('real_words', '?')}  \n"
-                        f"Readable words per page: {q.get('words_per_page', '?')}  \n"
-                        f"Unreadable characters: {q.get('junk_percent', '?')}%"
-                    )
+
+                    lines = [
+                        f"Pages: {q.get('pages', '?')}",
+                        f"Readable words: {q.get('real_words', '?')}",
+                        f"Readable words per page: {q.get('words_per_page', '?')}",
+                    ]
+
+                    # show whichever measurement actually caused the
+                    # rejection, rather than a fixed list that may all
+                    # read as normal
+                    if q.get("gibberish"):
+                        lines.append(
+                            "Words that are one letter repeated: "
+                            f"{q.get('repeated_word_percent', '?')}%"
+                        )
+                        lines.append(
+                            f"Vocabulary variety: {q.get('variety_percent', '?')}%"
+                        )
+                    else:
+                        lines.append(
+                            f"Unreadable characters: {q.get('junk_percent', '?')}%"
+                        )
+
+                    st.write("  \n".join(lines))
+
                     st.caption(
-                        "A document works here when its text can be selected "
-                        "and copied in a PDF reader."
+                        "A document works here when its text can be "
+                        "selected and copied in a PDF reader."
                     )
 
             else:
