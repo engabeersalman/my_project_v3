@@ -1462,11 +1462,15 @@ else:
         if question and question.strip():
 
             slot = st.empty()
+            # The stage list runs on a timer in the browser, so it
+            # cannot know whether n8n opened the document. Keep the
+            # second stage neutral rather than claiming something
+            # that may not have happened.
             show_progress(
                 slot,
                 [
                     "Checking your question",
-                    "Looking in the document",
+                    "Preparing the answer",
                 ],
                 est=9,
             )
