@@ -856,6 +856,10 @@ else:
             })
 
     # --- TAB 3 -------------------------------------------
+    #
+    # A normal chat: oldest at the top, newest at the bottom,
+    # and the input box pinned underneath the conversation.
+    # -----------------------------------------------------
 
     with tab_ask:
 
@@ -867,12 +871,50 @@ else:
             "your question."
         )
 
-        question = st.text_input(
-            "Your question",
-            placeholder="What does the document say about costs?",
-        )
+        # colours for the small badge above a non-answer
+        BADGE = {
+            "ok":   ("#0f766e", "#ccfbf1"),
+            "warn": ("#92400e", "#fef3c7"),
+            "stop": ("#991b1b", "#fee2e2"),
+        }
 
-        if st.button("Ask", type="primary", disabled=not question.strip()):
+        history = st.session_state["history"]
+
+        if not history:
+            with st.chat_message("assistant"):
+                st.write(
+                    f"Ask me anything about **{result.get('title') or 'this document'}**. "
+                    "I only answer from the PDF you uploaded."
+                )
+
+        # oldest first, so the newest reply is always at the bottom
+        for asked, answer, category, label, tone, quote in history:
+
+            with st.chat_message("user"):
+                st.write(asked)
+
+            with st.chat_message("assistant"):
+
+                if category != "answered":
+                    fg, bg = BADGE.get(tone, BADGE["warn"])
+                    st.markdown(
+                        f"<span style='background:{bg};color:{fg};"
+                        "padding:2px 9px;border-radius:999px;font-size:12px;"
+                        f"font-weight:600'>{label}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.write("")
+
+                st.write(answer)
+
+                if quote:
+                    st.caption(f"From the document: {quote}")
+
+        # --- the input sits below the conversation ---
+
+        question = st.chat_input("Ask about this document")
+
+        if question and question.strip():
 
             slot = st.empty()
             show_progress(slot, ["Checking the document"], est=8)
@@ -881,7 +923,7 @@ else:
                 ASK_URL,
                 ASK_TIMEOUT,
                 payload={
-                    "question": question,
+                    "question": question.strip(),
                     "document_text": document_text,
                     "doc_title": result.get("title") or "this document",
                 },
@@ -892,34 +934,13 @@ else:
             if error:
                 st.error(error)
             else:
-                st.session_state["history"].insert(0, (
-                    question,
+                # append, so the newest lands at the bottom
+                st.session_state["history"].append((
+                    question.strip(),
                     data.get("answer", "No answer returned."),
                     data.get("category", "unknown"),
                     data.get("category_label", "Unknown"),
                     data.get("tone", "warn"),
                     data.get("source_quote", ""),
                 ))
-
-        history = st.session_state["history"]
-
-        if history:
-            st.divider()
-
-            for asked, answer, category, label, tone, quote in history:
-
-                st.markdown(f"**{asked}**")
-
-                if tone == "ok":
-                    st.success(f"{label}")
-                elif tone == "stop":
-                    st.error(f"{label}")
-                else:
-                    st.warning(f"{label}")
-
-                st.write(answer)
-
-                if quote:
-                    st.caption(f"From the document: {quote}")
-
-                st.divider()
+                st.rerun()
